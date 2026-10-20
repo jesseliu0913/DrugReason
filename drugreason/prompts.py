@@ -1,4 +1,4 @@
-"""Label-free teacher prompts from the draft's prompt-template appendix."""
+"""Label-free teacher prompts for DrugReason reasoning views."""
 
 from .data import GENERATED_VIEWS
 

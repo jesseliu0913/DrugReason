@@ -1,4 +1,4 @@
-"""Canonical-label scores and the two objectives in the DrugReason draft."""
+"""Canonical-label scores and DrugReason training objectives."""
 
 import torch
 from torch.nn import functional as F

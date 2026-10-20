@@ -14,7 +14,7 @@ Use Python 3.11 or newer with a CUDA-enabled PyTorch installation:
 pip install -e '.[teacher]'
 ```
 
-The default experts are `meta-llama/Llama-3.2-3B-Instruct` and `Qwen/Qwen2.5-3B-Instruct`, loaded in 4-bit precision with LoRA adapters. A frozen RoBERTa encoder supplies routing representations. Access to the base models is required. Use `--quantization none` for small full-precision checks.
+The default experts are `meta-llama/Llama-3.2-3B-Instruct` and `Qwen/Qwen2.5-3B-Instruct`, loaded in 4-bit precision with LoRA adapters. A frozen RoBERTa encoder supplies routing representations. Access to the base models is required. Use `--quantization none` to disable quantization.
 
 ## Prepare data
 
@@ -42,7 +42,7 @@ This step makes teacher API calls and can resume completed pairs. Azure deployme
 
 Teacher prompts contain the candidate entities and reasoning instructions, without gold labels. Deterministic filtering rejects empty or malformed responses and removes explicit answer fields without paraphrasing retained text. Generated views are used only during training; inference uses KG views and never calls the teacher.
 
-**Existing reasoning release:** [JesseLiu/DrugReason-Reasoning](https://huggingface.co/datasets/JesseLiu/DrugReason-Reasoning) contains 20,544 annotations for 5,136 pairs, preserving full text and training prefixes. Those existing annotations were label-conditioned. They remain documented as such and are not automatically substituted for the label-free views required by this implementation. Removing an answer field cannot undo label conditioning.
+**Reasoning dataset:** [JesseLiu/DrugReason-Reasoning](https://huggingface.co/datasets/JesseLiu/DrugReason-Reasoning) provides 20,544 label-conditioned annotations for 5,136 entity pairs, including full reasoning text and training prefixes. The training protocol above requires label-free views generated with `drugreason.generate`; the released annotations are not compatible with that input requirement.
 
 ## Train
 
@@ -71,7 +71,7 @@ Stage 1: routed label-generation loss − λ₁ × routing-load entropy
 Stage 2: Stage 1 + λ₂ × symmetric label-distribution KL
 ```
 
-Dataset-specific learning rates and coefficients follow the draft's appendix. The defaults use one epoch, length 768, and an effective batch of eight pairs through gradient accumulation. Every available view contributes. `--learning-rate`, `--router-learning-rate`, `--load-weight`, `--mutual-weight`, `--temperature`, and `--tau` override the settings. `--label-batch-size` controls scoring memory use. Full label-space scoring, especially for DrugBank, is more expensive than scoring only the gold label.
+Dataset-specific learning rates and coefficients follow the paper's appendix. The defaults use one epoch, length 768, and an effective batch of eight pairs through gradient accumulation. Every available view contributes. `--learning-rate`, `--router-learning-rate`, `--load-weight`, `--mutual-weight`, `--temperature`, and `--tau` override the settings. `--label-batch-size` controls scoring memory use. Full label-space scoring, especially for DrugBank, is more expensive than scoring only the gold label.
 
 ## Evaluate
 
@@ -82,13 +82,15 @@ python -m drugreason.evaluate --checkpoint outputs/mutual \
 
 Inference uses deterministic router assignments, evaluates only the selected expert for each KG view, and averages the view-level label distributions. The output contains predictions, label probabilities, and routes. Label accuracy is printed when reference labels are available.
 
-## Code and checks
+## Code
 
 - `data.py`, `prompts.py`, `generate.py`: evidence preparation and label-free teacher views.
-- `components.py`, `losses.py`: routing, full-verbalizer scoring, and paper objectives.
+- `components.py`, `losses.py`: routing, full-verbalizer scoring, and training objectives.
 - `train.py`, `checkpoint.py`, `evaluate.py`: training, checkpoints, and routed inference.
-- `scripts/export_reasoning.py`: export of the existing reasoning annotations.
+- `scripts/export_reasoning.py`: reasoning annotation export.
 
-Run `python -m unittest discover -s tests -v` for the CPU tests. They check complete-label scoring, masking, routing gradients, detached KL targets, temperature scaling, and label-free serialization. Small Llama/Qwen models exercise both training stages and routed inference during validation. Full-scale experiments have not been rerun, and new label-free teacher annotations have not been generated as part of this cleanup.
+## Tests
 
-The repository contains the method implementation and overview figure. Model weights, experiment results, and baseline methods are not included.
+```bash
+python -m unittest discover -s tests -v
+```

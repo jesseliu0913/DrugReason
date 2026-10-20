@@ -1,4 +1,4 @@
-"""Export the existing reasoning annotations; never regenerate or paraphrase them."""
+"""Export DrugReason reasoning annotations in the public dataset schema."""
 
 import argparse
 import csv

@@ -130,7 +130,7 @@ class DrugReasonTests(unittest.TestCase):
         self.assertIsNone(clean_rationale("Answer: Major"))
         self.assertIsNone(clean_rationale("```json\n{}\n```"))
 
-    def test_legacy_conditioned_rationales_cannot_be_relabelled_as_paper_inputs(self):
+    def test_training_rejects_label_conditioned_views(self):
         row = {
             "split": "train",
             "views": [

@@ -120,7 +120,7 @@ def validate_training(rows):
             raise ValueError("Generate all four label-free teacher views before training.")
         if any(v.get("label_conditioned") is not False for v in generated.values()):
             raise ValueError(
-                "Training requires label-free generated views; legacy conditioned annotations cannot be relabeled."
+                "Training requires views generated without target labels (label_conditioned=False)."
             )
         if any(not v.get("text", "").strip() for v in row["views"]):
             raise ValueError("Empty reasoning view.")
