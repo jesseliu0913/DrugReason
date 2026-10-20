@@ -2,6 +2,8 @@
 
 Implementation for **DrugReason: Dynamic Multi-View Reasoning over Knowledge Graph and Language Evidence for Drug Repurposing**.
 
+**Accepted at EMNLP 2026 (Main Conference).**
+
 DrugReason combines KG evidence and label-free teacher reasoning views, routes each view to a Llama or Qwen expert, and trains the experts with symmetric mutual distillation over a shared semantic label space.
 
 ![DrugReason overview](assets/pipeline.png)
