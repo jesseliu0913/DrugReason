@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "drugreason"
+version = "0.1.0"
+requires-python = ">=3.11"
+description = "Conditional expert routing and mutual distillation for drug reasoning"
+readme = "README.md"
+dependencies = [
+  "torch>=2.5,<3",
+  "transformers>=4.51,<5",
+  "peft>=0.15,<0.19",
+  "accelerate>=1,<2",
+  "bitsandbytes>=0.45,<0.50",
+  "datasets>=3,<5",
+  "tqdm>=4.66"
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.9"]
+teacher = ["openai>=1.60,<3"]
+
+[tool.setuptools.packages.find]
+include = ["drugreason*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
