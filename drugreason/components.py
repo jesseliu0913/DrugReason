@@ -1,61 +1,40 @@
-"""Frozen text encoder, conditional router, and LoRA experts."""
+"""Frozen routing encoder and straight-through Gumbel router."""
 
 import torch
 from torch import nn
 from torch.nn import functional as F
 
 
-class CotEncoder(nn.Module):
+class FrozenEncoder(nn.Module):
     def __init__(self, backbone):
         super().__init__()
-        self.backbone = backbone
+        self.backbone = backbone.eval().requires_grad_(False)
 
     @torch.no_grad()
-    def forward(self, ids, mask):
-        h = self.backbone(input_ids=ids, attention_mask=mask, return_dict=True).last_hidden_state
-        num = (h * mask.unsqueeze(-1)).sum(1)
-        den = mask.sum(1, keepdim=True).clamp(min=1)
-        return (num / den).float()
+    def forward(self, input_ids, attention_mask):
+        hidden = self.backbone(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+        return (
+            (hidden * attention_mask.unsqueeze(-1)).sum(1)
+            / attention_mask.sum(1, keepdim=True).clamp_min(1)
+        ).float()
 
 
 class Router(nn.Module):
-    def __init__(self, d, tau):
+    def __init__(self, dimension, tau=1.0):
         super().__init__()
-        self.mlp = nn.Sequential(nn.Linear(d, d // 2), nn.GELU(), nn.Linear(d // 2, 2))
+        if tau <= 0:
+            raise ValueError("Routing temperature must be positive.")
         self.tau = tau
+        self.mlp = nn.Sequential(
+            nn.Linear(dimension, dimension // 2), nn.GELU(), nn.Linear(dimension // 2, 2)
+        )
 
-    def forward(self, h, tau=None):
-        current_tau = tau if tau is not None else self.tau
-        return F.gumbel_softmax(self.mlp(h), tau=current_tau, hard=True)
-
-
-class HiddenProjector(nn.Module):
-    def __init__(self, in_dim, out_dim):
-        super().__init__()
-        self.proj = nn.Linear(in_dim, out_dim, bias=False, dtype=torch.float16)
-
-    def forward(self, h):
-        return self.proj(h)
-
-
-class WeightLearner(nn.Module):
-    def __init__(self, d):
-        super().__init__()
-        self.fc = nn.Linear(d, 1, bias=False, dtype=torch.float16)
-
-    def forward(self, h):
-        return torch.sigmoid(self.fc(h)).squeeze(-1)
-
-
-def make_student(base):
-    from peft import get_peft_model, LoraConfig, TaskType
-
-    cfg = LoraConfig(
-        r=8,
-        lora_alpha=32,
-        target_modules=["q_proj", "v_proj"],
-        lora_dropout=0.05,
-        bias="none",
-        task_type=TaskType.CAUSAL_LM,
-    )
-    return get_peft_model(base, cfg)
+    def forward(self, hidden, deterministic=False):
+        logits = self.mlp(hidden)
+        if deterministic:
+            soft = (logits / self.tau).softmax(-1)
+        else:
+            noise = -torch.empty_like(logits).exponential_().log()
+            soft = ((logits + noise) / self.tau).softmax(-1)
+        hard = F.one_hot(soft.argmax(-1), num_classes=2).to(soft.dtype)
+        return hard - soft.detach() + soft, soft

@@ -1,12 +1,15 @@
-"""Teacher instructions for DrugReason's generated reasoning views."""
+"""Label-free teacher prompts from the draft's prompt-template appendix."""
+
+from .data import GENERATED_VIEWS
 
 
-def teacher_prompt(question, entity_a, entity_b, label, view):
-    instructions = {
-        "cot": f"Focus on the biomedical mechanism that explains this relationship. Describe how {entity_a} and {entity_b} interact through known molecular targets, pathways, or therapeutic processes. Do not restate the answer directly—justify it mechanistically.",
-        "tree_thought": f"Think in a tree of biomedical reasoning. Consider multiple plausible biological hypotheses that could explain how {entity_a} and {entity_b} are related—such as shared molecular targets, overlapping metabolic pathways, or downstream signaling effects. Compare these paths and select the one that most strongly supports the observed relationship.",
-        "fb": f"Start with forward biomedical reasoning: infer the relationship based on the known properties, mechanisms, and actions of {entity_a}. Then reason backward from the perspective of {entity_b}, validating whether this connection is biologically supported by known interactions, therapeutic roles, or pathway overlap. Conclude only if both directions align.",
+def teacher_prompt(entity_a, entity_b, view):
+    templates = {
+        "mechanism": f"Focus on the biomedical mechanism connecting {entity_a} and {entity_b}. Describe relevant molecular targets, pathways, pharmacological processes, or therapeutic mechanisms. Do not restate the answer directly; justify the relationship mechanistically.",
+        "chain_of_thought": f"Reason step by step about the possible biomedical relationship between {entity_a} and {entity_b}. Consider pharmacological effects, disease mechanisms, pathway connections, and interaction evidence.",
+        "tree_of_thought": f"Generate multiple plausible biomedical hypotheses for the relationship between {entity_a} and {entity_b}. Compare these hypotheses and identify which one is most biologically plausible.",
+        "forward_backward": f"First reason forward from {entity_a} to {entity_b}. Then reason backward from {entity_b} to {entity_a}. Check whether the two directions support a consistent biomedical relationship.",
     }
-    if view not in instructions:
-        raise ValueError(f"Unknown generated reasoning view: {view}")
-    return f"{question}\nAnswer: {label}\n\n{instructions[view]}\nYour reasoning should be in one paragraph."
+    if view not in GENERATED_VIEWS:
+        raise ValueError(f"Unknown reasoning view: {view}")
+    return templates[view]

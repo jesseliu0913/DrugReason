@@ -1,19 +1,24 @@
-"""Generate optional new teacher annotations from prepared pair records."""
+"""Add the four label-free teacher views to training pairs."""
 
 import argparse
-import json
 import os
 from pathlib import Path
+import json
+from .data import GENERATED_VIEWS, clean_rationale, read_jsonl
 from .prompts import teacher_prompt
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--input", required=True, help="JSONL records with A, B, question and label.")
+    p.add_argument("--input", required=True)
     p.add_argument("--output", required=True)
     p.add_argument("--model", required=True, help="Teacher model ID or Azure deployment name.")
-    p.add_argument("--view", required=True, choices=["cot", "tree_thought", "fb"])
     args = p.parse_args()
+    if Path(args.input).resolve() == Path(args.output).resolve():
+        p.error("Use separate input and output files.")
+    rows = read_jsonl(args.input)
+    if any(row.get("split") != "train" for row in rows):
+        p.error("Teacher-generated views are used only for training.")
     from openai import OpenAI, AzureOpenAI
 
     if os.getenv("AZURE_OPENAI_ENDPOINT"):
@@ -23,43 +28,42 @@ def main():
             api_version=os.environ["AZURE_OPENAI_API_VERSION"],
         )
     else:
-        client = OpenAI()  # OPENAI_API_KEY; optional OPENAI_BASE_URL.
+        client = OpenAI()
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    seen = set()
-    if output.exists():
-        for line in output.read_text().splitlines():
-            r = json.loads(line)
-            seen.add((r["A"], r["B"], r["prompt_type"]))
-    with Path(args.input).open() as source, output.open("a") as target:
-        for line in source:
-            r = json.loads(line)
-            key = r["A"], r["B"], args.view
-            if key in seen:
+
+    def key(row):
+        return row["entity_a"], row["entity_b"], row["label_id"]
+
+    seen = (
+        {key(row) for row in read_jsonl(output)}
+        if output.exists() and output.stat().st_size
+        else set()
+    )
+    with output.open("a") as f:
+        for row in rows:
+            if key(row) in seen:
                 continue
-            prompt = teacher_prompt(r["question"], r["A"], r["B"], r["label"], args.view)
-            response = client.chat.completions.create(
-                model=args.model, messages=[{"role": "user", "content": prompt}]
-            )
-            text = (response.choices[0].message.content or "").strip()
-            if not text:
-                raise ValueError("Teacher returned an empty response.")
-            target.write(
-                json.dumps(
-                    dict(
-                        A=r["A"],
-                        B=r["B"],
-                        question=r["question"],
-                        label=r["label"],
-                        prompt_type=args.view,
-                        prefix={"prefix": text.split("\n\n")[0], "gpt_output": text},
-                    ),
-                    ensure_ascii=False,
+            views = [v for v in row["views"] if v["kind"] in ("definition", "path")]
+            for kind in GENERATED_VIEWS:
+                response = client.chat.completions.create(
+                    model=args.model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": teacher_prompt(row["entity_a"], row["entity_b"], kind),
+                        }
+                    ],
                 )
-                + "\n"
-            )
-            target.flush()
-            seen.add(key)
+                rationale = clean_rationale(response.choices[0].message.content)
+                if rationale is None:
+                    raise ValueError(
+                        f"Teacher returned an invalid {kind} rationale; completed pairs are saved for resuming."
+                    )
+                views.append({"kind": kind, "text": rationale, "label_conditioned": False})
+            f.write(json.dumps(dict(row, views=views), ensure_ascii=False) + "\n")
+            f.flush()
+            seen.add(key(row))
 
 
 if __name__ == "__main__":

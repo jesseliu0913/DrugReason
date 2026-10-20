@@ -1,97 +1,75 @@
-"""Evaluate a trained DrugReason expert with deterministic answer generation."""
+"""Deterministic routed inference and mean aggregation over KG evidence views."""
 
 import argparse
 import json
 from pathlib import Path
+import torch
+from .checkpoint import load_bundle, routing_inputs
+from .data import read_jsonl, serialize_view
+from .losses import score_label_space
 
 
-def question_for(row, dataset):
-    if dataset == "pharmaDB":
-        return (
-            f"What is the therapeutic relationship between {row['drug_name']} and {row['disease_name']}?\n"
-            "Choices: [Disease-modifying, Palliates, Non-indication]"
-        )
-    if dataset == "ddinter":
-        return (
-            f"What is the interaction severity between {row['drug1_name']} and {row['drug2_name']}?\n"
-            "Choices: [Major, Moderate, Minor, No Interaction]"
-        )
-    return f"What is the pharmacological interaction between {row['drug1_name']} and {row['drug2_name']}?"
+@torch.inference_mode()
+def predict_pair(bundle, pair, labels, max_length=768, label_batch_size=4):
+    views = pair["views"]
+    if not views or any(view["kind"] not in ("definition", "path") for view in views):
+        raise ValueError("Inference uses only definition and KG-path views; no teacher rationales.")
+    prompts = [serialize_view(pair, view) for view in views]
+    gates, _ = bundle["router"](routing_inputs(bundle, prompts), deterministic=True)
+    routes = gates.argmax(-1)
+    distributions = torch.empty(len(views), len(labels), device=bundle["device"])
+    verbalizers = [item["text"] for item in labels]
+    for expert_id, (expert, tokenizer) in enumerate(zip(bundle["experts"], bundle["tokenizers"])):
+        selected = (routes == expert_id).nonzero(as_tuple=True)[0]
+        if selected.numel():
+            scores = score_label_space(
+                expert,
+                tokenizer,
+                [prompts[i] for i in selected.tolist()],
+                verbalizers,
+                max_length,
+                label_batch_size,
+            )
+            distributions[selected] = scores.softmax(-1)
+    probabilities = distributions.mean(0)
+    prediction = labels[int(probabilities.argmax())]
+    return {
+        "label_id": prediction["id"],
+        "label": prediction["text"],
+        "probabilities": probabilities.cpu().tolist(),
+        "routes": routes.cpu().tolist(),
+    }
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument(
-        "--checkpoint", required=True, help="The final_model or final_distilled directory."
-    )
-    p.add_argument("--expert", choices=["student1", "student2"], required=True)
-    p.add_argument("--dataset", choices=["ddinter", "drugbank", "pharmaDB"], required=True)
+    p.add_argument("--checkpoint", required=True)
+    p.add_argument("--data", required=True, help="Held-out pairs with KG views only.")
     p.add_argument("--output", required=True)
-    p.add_argument("--max-samples", type=int, default=1000)
-    p.add_argument("--max-new-tokens", type=int, default=100)
-    p.add_argument("--batch-size", type=int, default=4)
+    p.add_argument("--label-batch-size", type=int, default=4)
     args = p.parse_args()
-    import torch
-    from datasets import load_dataset
-    from peft import PeftModel
-    from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
-
-    checkpoint = Path(args.checkpoint)
-    config = torch.load(checkpoint / "components.pt", map_location="cpu", weights_only=True)
-    config = config.get("args_stage3", config.get("args"))
-    base_id = config["model1" if args.expert == "student1" else "model2"]
-    tokenizer = AutoTokenizer.from_pretrained(base_id, padding_side="left")
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    base = AutoModelForCausalLM.from_pretrained(
-        base_id,
-        device_map="auto",
-        torch_dtype=torch.float16,
-        quantization_config=BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=True,
-        ),
-    )
-    model = PeftModel.from_pretrained(base, checkpoint / args.expert).eval()
-    data = load_dataset(f"Tassy24/K-Paths-inductive-reasoning-{args.dataset}", split="test")
-    if args.max_samples > 0 and len(data) > args.max_samples:
-        data = data.shuffle(seed=42).select(range(args.max_samples))
+    path = Path(args.checkpoint)
+    config = json.loads((path / "config.json").read_text())
+    labels = json.loads((path / "labels.json").read_text())
+    bundle = load_bundle(config, args.checkpoint, trainable=False)
+    pairs = read_jsonl(args.data)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("w") as f, torch.inference_mode():
-        for start in range(0, len(data), args.batch_size):
-            rows = [data[i] for i in range(start, min(start + args.batch_size, len(data)))]
-            prompts = [
-                question_for(row, args.dataset) + "\n\nDirectly answer it with ANSWER:"
-                for row in rows
-            ]
-            encoded = tokenizer(
-                prompts, return_tensors="pt", padding=True, truncation=True, max_length=1024
-            ).to(model.device)
-            generated = model.generate(
-                **encoded,
-                do_sample=False,
-                max_new_tokens=args.max_new_tokens,
-                pad_token_id=tokenizer.pad_token_id,
+    correct, count = 0, 0
+    with output.open("w") as f:
+        for pair in pairs:
+            prediction = predict_pair(
+                bundle, pair, labels, config["max_length"], args.label_batch_size
             )
-            answers = tokenizer.batch_decode(
-                generated[:, encoded["input_ids"].shape[1] :], skip_special_tokens=True
-            )
-            for row, answer in zip(rows, answers):
-                f.write(
-                    json.dumps(
-                        {
-                            "question": question_for(row, args.dataset),
-                            "label": row["label"],
-                            "answer": answer.strip(),
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
-                )
-    print(f"Saved {len(data)} predictions to {output}")
+            record = {"entity_a": pair["entity_a"], "entity_b": pair["entity_b"], **prediction}
+            if "label_id" in pair:
+                record["target_label_id"] = pair["label_id"]
+                correct += pair["label_id"] == prediction["label_id"]
+                count += 1
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    print(f"Saved {len(pairs)} predictions to {output}")
+    if count:
+        print(f"Label accuracy: {correct / count:.4f}")
 
 
 if __name__ == "__main__":
